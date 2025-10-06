@@ -3,7 +3,7 @@
 # Directory containing the data files
 DATA_DIR="/scratch/momenika/MITgcm/collection_runs_llc1080"
 
-THRESH_N=43344
+THRESH_N=38454
 
 # Loop over all files matching U.[N].data
 for file in "$DATA_DIR"/U.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].data; do
@@ -18,13 +18,12 @@ for file in "$DATA_DIR"/U.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].dat
 
     # Run the command
     python vis_llc.py \
-        "$DATA_DIR/U.$N.data" \
-	"$DATA_DIR/V.$N.data" \
-	--mode bg \
+        "$DATA_DIR/Salt.$N.data" \
         --nx 1080 \
         --level 1 \
-        --vmin 0 \
-        --vmax 0.5 \
+        --cmap turbo \
+        --vmin 32 \
+        --vmax 38 \
         --startyr 2023 \
         --startmo 01 \
         --startdy 01 \
@@ -35,5 +34,5 @@ for file in "$DATA_DIR"/U.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].dat
         --ice-shelf "$PROJECT/llc1080_template/BEDMACHINE_on_LLC1080_v13.bin" \
         --sea-ice "$DATA_DIR/SIheff.$N.data" \
         --no-show \
-	--o "/scratch/momenika/llc_1080_visualizations/sea_surface_speed/surface_speed.$N.png"
+        --o "/scratch/momenika/comparison_1080/SSS_STD/surface_salinity.$N.png"
 done

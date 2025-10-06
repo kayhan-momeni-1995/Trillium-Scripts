@@ -16,6 +16,10 @@ from __future__ import annotations
 from typing import Optional, Tuple, Union
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.interpolate import RegularGridInterpolator
+from scipy import ndimage as ndi
+from matplotlib.colors import ListedColormap, Normalize
+from matplotlib.widgets import RectangleSelector
 
 ArrayLike = Union[np.ndarray]
 
@@ -349,4 +353,154 @@ def plot_llc_vector_cgrid(
     return im, q, {"Fu": Fu, "Fv": Fv, "Uc": Uc, "Vc": Vc, "Fbg": Fbg}
 
 
-__all__ = ["plot", "plot_llc_vector_cgrid"]
+
+
+# ---------- Colormap helpers ----------
+def _get_cmap_resampled(name: str, n: int):
+    """
+    Return a colormap with exactly n entries across Matplotlib versions.
+    Avoids deprecated/changed signatures of get_cmap.
+    """
+    cmap = plt.colormaps.get_cmap(name)
+    if hasattr(cmap, "resampled"):
+        return cmap.resampled(n)
+    # Manual resample
+    return ListedColormap(cmap(np.linspace(0, 1, n)))
+
+def make_seismic_zero_white(vmin: float, vmax: float, n: int = 256):
+    """
+    Remap 'seismic' so that WHITE occurs exactly at value 0 under a *linear*
+    Normalize(vmin, vmax). No symmetric limits, no TwoSlopeNorm.
+
+    If 0 is not in [vmin, vmax] or range is degenerate, returns the base cmap.
+    """
+    base = _get_cmap_resampled('seismic', n)
+
+    # Degenerate or zero not inside: keep linear scaling & original mapping
+    if not (np.isfinite(vmin) and np.isfinite(vmax)) or vmax <= vmin or not (vmin < 0 < vmax):
+        return base, Normalize(vmin=vmin, vmax=vmax)
+
+    # Linear position of 0 in [0, 1]
+    mid = (0.0 - vmin) / (vmax - vmin)
+
+    x = np.linspace(0.0, 1.0, n)
+    g = np.empty_like(x)
+
+    # Piecewise-linear warp mapping x=mid -> base(0.5) (white)
+    left = x <= mid
+    right = ~left
+    if mid > 0:
+        g[left] = 0.5 * (x[left] / mid)
+    else:
+        g[left] = 0.0
+    if mid < 1:
+        g[right] = 0.5 + 0.5 * ((x[right] - mid) / (1.0 - mid))
+    else:
+        g[right] = 1.0
+
+    new_colors = base(g)
+    return ListedColormap(new_colors), Normalize(vmin=vmin, vmax=vmax)
+
+# ---------- Interactive plotting ----------
+def interactive_plot(M, pixel_per_cell: int = 1):
+    """
+    Interactive heatmap with:
+      - exact 1 cell per matrix element (no interpolation, integer-aligned)
+      - linear scaling from min(M) to max(M) (no symmetric forcing, no TwoSlopeNorm)
+      - 0 mapped to white by remapping 'seismic' itself (NOT by renormalizing data)
+      - hover shows exact (i, j, val) in the status bar (no redraw on motion)
+      - drag a rectangle to zoom; 'r' = step back; 'a' = reset
+    """
+    M = np.asarray(M)
+    if M.ndim != 2:
+        raise ValueError("M must be a 2D array")
+
+    nrows, ncols = M.shape
+    vmin = float(np.nanmin(M))
+    vmax = float(np.nanmax(M))
+
+    cmap, norm = make_seismic_zero_white(vmin, vmax)
+
+    # Size so ~pixel_per_cell screen pixels per matrix cell; avoid constrained_layout to prevent thrash
+    dpi = float(plt.rcParams.get("figure.dpi", 100))
+    fig_w = max(1.0, (ncols * pixel_per_cell) / dpi)
+    fig_h = max(1.0, (nrows * pixel_per_cell) / dpi)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    im = ax.imshow(
+        M,
+        cmap=cmap,
+        norm=norm,                # linear vmin..vmax (data scale unchanged)
+        interpolation="nearest",  # no smoothing
+        origin="upper",
+        extent=(0, ncols, nrows, 0),  # each cell is [j, j+1) × [i, i+1)
+        aspect="equal",
+    )
+    fig.colorbar(im, ax=ax)
+
+    ax.set_title("Drag to zoom  |  'r' back  |  'a' reset")
+    ax.set_xlabel("Column (j)")
+    ax.set_ylabel("Row (i)")
+    ax.set_xlim(0, ncols)
+    ax.set_ylim(nrows, 0)
+
+    # Exact indices & value in the status bar (no canvas redraws while moving)
+    def format_coord(x, y):
+        if 0 <= x < ncols and 0 <= y < nrows:
+            i, j = int(y), int(x)
+            return f"i={i}, j={j}, val={M[i, j]!r}"
+        return ""
+    ax.format_coord = format_coord
+
+    # Box-zoom: update only on mouse release (stable)
+    zoom_stack = []
+    def onselect(eclick, erelease):
+        if None in (eclick.xdata, eclick.ydata, erelease.xdata, erelease.ydata):
+            return
+        x1, y1 = eclick.xdata, eclick.ydata
+        x2, y2 = erelease.xdata, erelease.ydata
+        if abs(x2 - x1) < 1 and abs(y2 - y1) < 1:
+            return
+
+        xmin, xmax = sorted([x1, x2])
+        ymin, ymax = sorted([y1, y2])
+
+        # Snap to integer cell edges
+        xmin_i = max(0, int(np.floor(xmin)))
+        xmax_i = min(ncols, int(np.ceil(xmax)))
+        ymin_i = max(0, int(np.floor(ymin)))
+        ymax_i = min(nrows, int(np.ceil(ymax)))
+
+        zoom_stack.append(ax.axis())  # save current view
+        ax.set_xlim(xmin_i, xmax_i)
+        ax.set_ylim(ymax_i, ymin_i)   # origin='upper' -> inverted y
+        fig.canvas.draw_idle()
+
+    def on_key(event):
+        if event.key == "r":
+            if zoom_stack:
+                ax.axis(zoom_stack.pop())
+                fig.canvas.draw_idle()
+        elif event.key == "a":
+            zoom_stack.clear()
+            ax.set_xlim(0, ncols)
+            ax.set_ylim(nrows, 0)
+            fig.canvas.draw_idle()
+
+    RectangleSelector(
+        ax, onselect,
+        useblit=True,            # fast rubber-band, no image redraw
+        button=[1],
+        minspanx=2, minspany=2,
+        spancoords="pixels",
+        interactive=False,
+    )
+    fig.canvas.mpl_connect("key_press_event", on_key)
+
+    # Optional: activate the toolbar's zoom for familiar UX (safe if toolbar exists)
+    try:
+        fig.canvas.toolbar.zoom()
+    except Exception:
+        pass
+
+    plt.show()

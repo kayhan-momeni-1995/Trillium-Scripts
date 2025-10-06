@@ -10,6 +10,7 @@ Example:
 """
 from .quikplot import quikplot
 from .plot import plot
+from .plot import interactive_plot
 from .plot import plot_llc_vector_cgrid
 from .read_llc_fkij import read_llc_fkij
 from .rect2llc import rect2llc
@@ -22,5 +23,6 @@ from .llc2rect import llc2rect_nd
 from .quikpcolor import quikpcolor
 from .readbin import readbin
 
-__all__ = ['quikplot', 'plot', 'plot_llc_vector_cgrid', 'read_llc_fkij', 'rect2llc', 'writebin', 'ts2dte', 'quikread', 'minmax_levels', 'llc2rect', 'llc2rect_nd','quikpcolor', 'readbin']
+
+__all__ = ['quikplot', 'plot', 'interactive_plot', 'plot_llc_vector_cgrid', 'read_llc_fkij', 'rect2llc', 'writebin', 'ts2dte', 'quikread', 'minmax_levels', 'llc2rect', 'llc2rect_nd','quikpcolor', 'readbin']
 __version__ = "0.1.0"
