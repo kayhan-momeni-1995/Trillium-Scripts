@@ -16,7 +16,7 @@ import numpy as np
 from multiprocessing.shared_memory import SharedMemory
 from scipy import ndimage as ndi
 
-import llc  # your optimized llc.llc2rect / llc.rect2llc
+import llc 
 
 
 # ===========================
