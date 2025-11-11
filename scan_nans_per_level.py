@@ -60,10 +60,10 @@ def main():
         description="Scan a big-endian real*4 (float32) 3D binary file "
                     "for NaNs level-by-level."
     )
-    parser.add_argument("filename", help="Path to binary file")
-    parser.add_argument("nx", type=int, help="First dimension size (e.g. 4320)")
-    parser.add_argument("ny", type=int, help="Second dimension size (e.g. 4320*13)")
-    parser.add_argument("nz", type=int, help="Number of levels (third dimension)")
+    parser.add_argument("--filename", help="Path to binary file")
+    parser.add_argument("--nx", type=int, help="First dimension size (e.g. 4320)")
+    parser.add_argument("--ny", type=int, help="Second dimension size (e.g. 4320*13)")
+    parser.add_argument("--nz", type=int, help="Number of levels (third dimension)")
 
     args = parser.parse_args()
 
