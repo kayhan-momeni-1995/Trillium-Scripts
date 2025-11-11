@@ -312,6 +312,13 @@ def interpolate_level(U: np.ndarray, V: np.ndarray, nx: int, k: int,
     )
     final_V = np.concatenate([V1245_upsampled, right_pad_V], axis=1)
 
+    # Fill NaNs
+    final_U[final_U == 0] = np.nan
+    final_U = fillna_with_nearest(final_U)
+
+    final_V[final_V == 0] = np.nan
+    final_V = fillna_with_nearest(final_V)
+                         
     final_U = llc.rect2llc(final_U)
     final_V = llc.rect2llc(final_V)
 
