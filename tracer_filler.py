@@ -194,8 +194,8 @@ def interpolate_level(fld: np.ndarray, nx: int, k: int,
     final[nx*k + face3_upsampled.shape[0]:, Ck_left:] = 0.0
 
     # Fill NaNs
-    #final[final == 0] = np.nan
-#    final = fillna_with_nearest(final)
+    final[final == 0] = np.nan
+    final = fillna_with_nearest(final)
 
     # Back to LLC
     final = llc.rect2llc(final)
