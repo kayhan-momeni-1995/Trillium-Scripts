@@ -2,21 +2,12 @@
 """
 Parallel, SharedMemory-based, ordered-writer driver for LLC U/V velocity interpolation.
 
-Design mirrors the user's SHM pattern:
+Design pattern:
 
 1) Parent memmaps inputs, reads each level and BE->native f32 converts into input SHM (U,V).
 2) Worker attaches to input SHM, computes, writes native f32 outputs into output SHM (U,V).
 3) Parent writes output SHMs to disk in strict level order using a single writer per file,
    streaming big-endian f32 in Fortran order with a configurable column chunk size.
-
-Bit-identical to the serial path because:
-- per-level math is unchanged (same interpolate_level)
-- BE->native f32 input conversion matches serial
-- native f32 -> BE f32 streaming in Fortran order matches serial
-- strict level order writes (0,1,2,...) with a single writer per output file
-
-CLI intentionally does NOT parse a memory budget (interp_mem_budget): it is a function argument,
-as in the user's previous SHM driver snippet.
 """
 
 import argparse
