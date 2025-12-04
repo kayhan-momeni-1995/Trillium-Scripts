@@ -582,15 +582,18 @@ def _mask_overlay_rect(
     c_hice  = np.array(to_rgba("#e9f4ff"))
     eps = 1e-12
 
-    if Brect is not None:
-        m = (Brect >= zlev) & zero_mask
-        overlay[m] = c_bathy
-    if ISrect is not None:
-        m = (ISrect <= zlev) & zero_mask & (np.abs(ISrect) > eps)
-        overlay[m] = c_ice
     if HIrect is not None:
-        m = (HIrect > eps) & ((-HIrect) <= zlev)
+#       m = (HIrect > eps) & ((-HIrect) <= zlev)
+        m = (np.abs(HIrect) > eps) & ((-HIrect) <= zlev)
         overlay[m] = c_hice
+    if ISrect is not None:
+#       m = (ISrect <= zlev) & zero_mask & (np.abs(ISrect) > eps)
+        m = (ISrect <= zlev) & (np.abs(ISrect) > eps)
+        overlay[m] = c_ice
+    if Brect is not None:
+#       m = (Brect >= zlev) & zero_mask
+        m = (Brect >= zlev)
+        overlay[m] = c_bathy
 
     # To display on top of imshow(F.T, origin="lower"), transpose rows/cols
     disp = np.transpose(overlay, (1, 0, 2))
