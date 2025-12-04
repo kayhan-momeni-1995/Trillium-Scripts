@@ -160,7 +160,7 @@ def interpolate_level(U: np.ndarray, V: np.ndarray, nx: int, k: int,
     U3[2:-2,   0   ] = U12[nx:2*nx, -2]
     U3[2:-2,  -1   ] = np.flip(-V45[nx:2*nx, -2])
 
-    U3[U3 == 0] = np.nan
+    #U3[U3 == 0] = np.nan
     U3 = fillna_with_nearest(U3)
 
     # --------------------------
@@ -184,7 +184,7 @@ def interpolate_level(U: np.ndarray, V: np.ndarray, nx: int, k: int,
     V3[2:-2,   0   ] = V12[nx:2*nx, -2]
     V3[2:-2,  -1   ] = np.flip(U45[nx:2*nx, -2])
 
-    V3[V3 == 0] = np.nan
+    #V3[V3 == 0] = np.nan
     V3 = fillna_with_nearest(V3)
 
     # upsample + crop (unchanged)
@@ -226,7 +226,7 @@ def interpolate_level(U: np.ndarray, V: np.ndarray, nx: int, k: int,
     U_new[-2, :]   = U_rows[0,  :]
     U_new[-1, :]   = U_rows[1,  :]
 
-    U_new[U_new == 0] = np.nan
+    #U_new[U_new == 0] = np.nan
     U_new = fillna_with_nearest(U_new)
 
     # --------------------------
@@ -261,7 +261,7 @@ def interpolate_level(U: np.ndarray, V: np.ndarray, nx: int, k: int,
     V_new[-2, :]   = V_rows[0,  :]
     V_new[-1, :]   = V_rows[1,  :]
 
-    V_new[V_new == 0] = np.nan
+    #V_new[V_new == 0] = np.nan
     V_new = fillna_with_nearest(V_new)
 
     # upsample + crop (unchanged)
@@ -304,10 +304,10 @@ def interpolate_level(U: np.ndarray, V: np.ndarray, nx: int, k: int,
     final_V = np.concatenate([V1245_upsampled, right_pad_V], axis=1)
 
     # Fill NaNs
-    final_U[final_U == 0] = np.nan
+    #final_U[final_U == 0] = np.nan
     final_U = fillna_with_nearest(final_U)
 
-    final_V[final_V == 0] = np.nan
+    #final_V[final_V == 0] = np.nan
     final_V = fillna_with_nearest(final_V)
                          
     final_U = llc.rect2llc(final_U)
