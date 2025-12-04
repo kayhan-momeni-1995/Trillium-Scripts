@@ -210,7 +210,7 @@ def interpolate_level(fld: np.ndarray, hfacc: np.ndarray,  nx: int, k: int,
 
 def _worker_process_level(idx: int,
                           shm_in_name: str, in_shape: tuple[int, int],
-                          shm_hfacc_name: str, in_shape: tuple[int, int],
+                          shm_hfacc_name: str,
                           shm_out_name: str, out_shape: tuple[int, int],
                           nx: int, k: int,
                           interp_mem_budget: int) -> int:
@@ -237,6 +237,7 @@ def _worker_process_level(idx: int,
         return idx
     finally:
         shm_in.close()
+        shm_hfacc.close()
         shm_out.close()
 
 
@@ -339,11 +340,11 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
             fut = pool.submit(_worker_process_level,
                               idx,
                               shm_in.name, (in_rows, in_cols),
-                              shm_hfacc.name, (in_rows, in_cols),
+                              shm_hfacc.name,
                               shm_out.name, (out_rows, out_cols),
                               nx, k_proc,
                               interp_mem_budget)
-            pending[fut] = (idx, shm_in.name, shm_out.name)
+            pending[fut] = (idx, shm_in.name, shm_hfacc.name, shm_out.name)
             submitted += 1
 
         # Prime initial inflight
@@ -354,10 +355,10 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
         while pending:
             # Wait for any completion
             for fut in as_completed(list(pending.keys())):
-                idx, shm_in_name, shm_out_name = pending.pop(fut)
+                idx, shm_in_name, shm_hfacc_name, shm_out_name = pending.pop(fut)
                 idx_done = fut.result()  # propagate worker exceptions
                 assert idx_done == idx
-                ready[idx] = (shm_in_name, shm_out_name)
+                ready[idx] = (shm_in_name, shm_hfacc_name, shm_out_name)
 
                 # Maintain inflight: submit next if any left
                 if submitted < n_levels:
@@ -365,7 +366,7 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
 
                 # Write in strict order as far as possible
                 while next_to_write in ready:
-                    in_name, out_name = ready.pop(next_to_write)
+                    in_name, hfacc_name, out_name = ready.pop(next_to_write)
 
                     # Stream write this level from output SHM
                     _write_shm_to_file(fout, out_name, (out_rows, out_cols), col_chunk=writer_chunk_cols)
@@ -379,6 +380,10 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
                         shm_in = SharedMemory(name=in_name); shm_in.close(); shm_in.unlink()
                     except FileNotFoundError:
                         pass
+                    try:
+                        shm_hfacc = SharedMemory(name=hfacc_name); shm_hfacc.close(); shm_hfacc.unlink()
+                    except FileNotFoundError:
+                        pass
 
                     written += 1
                     next_to_write += 1
@@ -387,6 +392,7 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
 
     # Close input memmap
     del mm
+    del hfaccmm
 
     print(f"Finished. Wrote {n_levels} levels to {dst_path}")
 
@@ -451,7 +457,7 @@ if __name__ == "__main__":
         print(f"[warn] Each level output ≈ {per_level_out_gb:.2f} GiB; --inflight {args.inflight} "
               f"may stress RAM. Consider lower inflight.", file=sys.stderr)
 
-    main(args.input, args.output, hfacc=args.hFacC,
+    main(args.input, args.output, args.hFacC,
          nx=args.nx, k_proc=args.k,
          workers=args.workers, inflight=args.inflight,
          interp_mem_budget=mem_budget,
