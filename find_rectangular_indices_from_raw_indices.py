@@ -1,0 +1,29 @@
+import os
+import re
+import argparse
+import llc
+import numpy as np
+
+def main():
+    ap = argparse.ArgumentParser(
+        description = "convert x and y raw coordinates into llc rectangular coordinates.")
+    ap.add_argument("--x", type=int, required=True, help="raw x-coord")
+    ap.add_argument("--y", type=int, required=True, help="raw y-coord")
+    ap.add_argument("--nx", type=int, required=True, help="resolution of llc grid. e.g., 1080, 4320, etc.")
+
+    args = ap.parse_args()
+
+    raw_field = np.zeros((args.nx, args.nx*13))
+
+    raw_field[args.x, args.y]=1
+
+    rect_field = llc.llc2rect(raw_field)
+
+    x_new = np.where(rect_field==1)[0][0]
+    y_new = np.where(rect_field==1)[1][0]
+
+    print(f"(x, y) coord in the new llc rectangular grid is: ({x_new}, {y_new})")
+
+
+if __name__ == "__main__":
+    main()

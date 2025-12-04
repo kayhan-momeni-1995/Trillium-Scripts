@@ -417,7 +417,7 @@ def _apply_crop_to_image(ax, im, xmin=None, xmax=None, ymin=None, ymax=None):
 # -----------------------------
 def apply_top_strip(
     ax, im, title_text: str | None, *,
-    strip_h=0.06, pad=0.01, cbar_rel_w=0.4, cbar_height_frac=0.2,
+    strip_h=0.05, pad=0.05, cbar_rel_w=0.4, cbar_height_frac=0.2,
     decimals=2, bg_alpha=0.98
 ):
     """
@@ -475,10 +475,10 @@ def apply_top_strip(
         tick_len_px  = np.clip(strip_h_px * 0.35, 4, 16)
         tick_w_px    = np.clip(strip_h_px * 0.05, 1.0, 3.0)
 
-    title_pt   = float(title_px * 72.0 / dpi)*5
-    label_pt   = float(label_px * 72.0 / dpi)*5
-    tick_len_pt= float(tick_len_px * 72.0 / dpi)*5
-    tick_w_pt  = float(tick_w_px * 72.0 / dpi)*5
+    title_pt   = float(title_px * 72.0 / dpi)*1
+    label_pt   = float(label_px * 72.0 / dpi)*1
+    tick_len_pt= float(tick_len_px * 72.0 / dpi)*1
+    tick_w_pt  = float(tick_w_px * 72.0 / dpi)*1
 
     # --- Draw title and colorbar -------------------------------------------
     if title_text:
