@@ -156,15 +156,17 @@ def _build_face3_with_bc(face3: np.ndarray, face1245_trim: np.ndarray, nx: int) 
 # Per-level processing (same output as single-process)
 # ===========================
 
-def interpolate_level(fld: np.ndarray, nx: int, k: int,
+def interpolate_level(fld: np.ndarray, hfacc: np.ndarray,  nx: int, k: int,
                       *,
                       interp_mem_budget: int = 512 << 20) -> np.ndarray:
     # LLC -> rectangular
     fld = llc.llc2rect(fld)
+    hfacc = llc.llc2rect(hfacc)
 
     # Remove zeros => NaN
     fld = fld.copy()
-    fld[fld == 0] = np.nan
+    fld[hfacc == 0] = np.nan
+    fld = fillna_with_nearest(fld)
 
     # Split out Arctic and the rest
     face3 = fld[nx:2*nx, 3*nx:4*nx]   # (nx, nx)
@@ -172,13 +174,13 @@ def interpolate_level(fld: np.ndarray, nx: int, k: int,
 
     # Rectangle with periodic borders
     face1245_ext = _build_face1245_with_bc(face1245, face3)
-    face1245_ext[face1245_ext == 0] = np.nan
+    #face1245_ext[face1245_ext == 0] = np.nan
     face1245_ext = fillna_with_nearest(face1245_ext)
     face1245_upsampled = _upsample_periodic_staggered_separable(face1245_ext, k, max_bytes=interp_mem_budget)
 
     # Arctic with borders
     face3_ext = _build_face3_with_bc(face3, face1245, nx)
-    face3_ext[face3_ext == 0] = np.nan
+    #face3_ext[face3_ext == 0] = np.nan
     face3_ext = fillna_with_nearest(face3_ext)
     face3_upsampled = _upsample_periodic_staggered_separable(face3_ext, k, max_bytes=interp_mem_budget)
 
@@ -194,7 +196,7 @@ def interpolate_level(fld: np.ndarray, nx: int, k: int,
     final[nx*k + face3_upsampled.shape[0]:, Ck_left:] = 0.0
 
     # Fill NaNs
-    final[final == 0] = np.nan
+    #final[final == 0] = np.nan
     final = fillna_with_nearest(final)
 
     # Back to LLC
@@ -208,6 +210,7 @@ def interpolate_level(fld: np.ndarray, nx: int, k: int,
 
 def _worker_process_level(idx: int,
                           shm_in_name: str, in_shape: tuple[int, int],
+                          shm_hfacc_name: str, in_shape: tuple[int, int],
                           shm_out_name: str, out_shape: tuple[int, int],
                           nx: int, k: int,
                           interp_mem_budget: int) -> int:
@@ -219,12 +222,14 @@ def _worker_process_level(idx: int,
     Returns the level index.
     """
     shm_in = SharedMemory(name=shm_in_name)
+    shm_hfacc = SharedMemory(name=shm_hfacc_name)
     shm_out = SharedMemory(name=shm_out_name)
     try:
         in_arr  = np.ndarray(in_shape,  dtype=np.float32, buffer=shm_in.buf)   # native f32
+        hfacc_arr  = np.ndarray(in_shape,  dtype=np.float32, buffer=shm_hfacc.buf)   # native f32
         out_arr = np.ndarray(out_shape, dtype=np.float32, buffer=shm_out.buf)  # native f32
 
-        out64 = interpolate_level(in_arr, nx, k, interp_mem_budget=interp_mem_budget)
+        out64 = interpolate_level(in_arr, hfacc_arr, nx, k, interp_mem_budget=interp_mem_budget)
         out32 = out64.astype(np.float32, copy=False)  # single rounding, bit-identical to write-stage cast
         np.copyto(out_arr, out32, casting="no")
         # free intermediates ASAP
@@ -259,7 +264,7 @@ def _write_shm_to_file(fout, shm_name: str, shape: tuple[int, int], col_chunk: i
 # Parallel driver
 # ===========================
 
-def main(src_path: str, dst_path: str, nx: int, k_proc: int,
+def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
          *,
          workers: int,
          inflight: int,
@@ -291,6 +296,7 @@ def main(src_path: str, dst_path: str, nx: int, k_proc: int,
 
     # Single input memmap
     mm = np.memmap(src_path, dtype='u1', mode="r")
+    hfaccmm = np.memmap(hfacc_path, dtype='u1', mode="r")
 
     # Writer (single)
     with open(dst_path, "wb", buffering=io.DEFAULT_BUFFER_SIZE) as fout, \
@@ -312,10 +318,19 @@ def main(src_path: str, dst_path: str, nx: int, k_proc: int,
                                 offset=off,
                                 strides=(4, 4*in_rows))  # Fortran layout on disk
 
+            lvl_be_hfacc = np.ndarray(shape=(in_rows, in_cols),
+                                dtype=">f4",
+                                buffer=hfaccmm,
+                                offset=off,
+                                strides=(4, 4*in_rows))  # Fortran layout on disk
+
             # Parent creates input SHM (native f32) and copies the level
-            shm_in = SharedMemory(create=True, size=in_bytes)
+            shm_in    = SharedMemory(create=True, size=in_bytes)
+            shm_hfacc = SharedMemory(create=True, size=in_bytes)
             in_arr = np.ndarray((in_rows, in_cols), dtype=np.float32, buffer=shm_in.buf)
+            hfacc_arr = np.ndarray((in_rows, in_cols), dtype=np.float32, buffer=shm_hfacc.buf)
             np.copyto(in_arr, lvl_be, casting="unsafe")  # endian + dtype convert in one pass
+            np.copyto(hfacc_arr, lvl_be_hfacc, casting="unsafe")  # endian + dtype convert in one pass
 
             # Parent creates output SHM (native f32) for worker to fill
             shm_out = SharedMemory(create=True, size=out_bytes)
@@ -324,6 +339,7 @@ def main(src_path: str, dst_path: str, nx: int, k_proc: int,
             fut = pool.submit(_worker_process_level,
                               idx,
                               shm_in.name, (in_rows, in_cols),
+                              shm_hfacc.name, (in_rows, in_cols),
                               shm_out.name, (out_rows, out_cols),
                               nx, k_proc,
                               interp_mem_budget)
@@ -380,6 +396,7 @@ if __name__ == "__main__":
     ap.add_argument("--nx", type=int, required=True, help="Tile size (e.g., 270 or 1080)")
     ap.add_argument("--k", type=int, default=1, help="Upsampling factor")
     ap.add_argument("--input", required=True, help="Path to input .data (big-endian real*4)")
+    ap.add_argument("--hFacC", required=True, help="Path to the source grid's hFacC file (big-endian real*4). This is **NOT** the target grid's hFacC.")
     ap.add_argument("--output", required=True, help="Path to output .data (will be overwritten)")
     ap.add_argument("--mem", type=str, default="4G",
                     help="Approx per-interpolator working memory for interpolation chunks, e.g. 256M, 1G, 2G")
@@ -434,7 +451,7 @@ if __name__ == "__main__":
         print(f"[warn] Each level output ≈ {per_level_out_gb:.2f} GiB; --inflight {args.inflight} "
               f"may stress RAM. Consider lower inflight.", file=sys.stderr)
 
-    main(args.input, args.output,
+    main(args.input, args.output, hfacc=args.hFacC,
          nx=args.nx, k_proc=args.k,
          workers=args.workers, inflight=args.inflight,
          interp_mem_budget=mem_budget,
