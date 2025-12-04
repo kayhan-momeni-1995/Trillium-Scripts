@@ -3,29 +3,36 @@
 field_stats_cli.py
 
 Stream level-by-level through MITgcm LLC big-endian real*4 binaries laid out as
-[nx, nx*13, nk], with nk vertical levels stacked.
+[nx, nx*13, nk], with nk vertical levels.
 
-Each level k = 1..nk is [nx, nx*13] (i, j).
+Logical shape:
+  field(i, j, k) with:
+    i = 0 .. nx-1
+    j = 0 .. nx*13-1
+    k = 0 .. nk-1
 
-For each level k, compute:
+Flattened, each level k is length n_per_level = nx * (nx*13),
+stored with i as the fastest index.
+
+For each level k, this script computes:
   - min
   - max
   - mean      (population mean)
   - std       (population standard deviation, sqrt(E[x^2] - E[x]^2))
-  - (i_min, j_min): location of min within that level
-  - (i_max, j_max): location of max within that level
+  - (i_min, j_min): location of min within that level (0-based)
+  - (i_max, j_max): location of max within that level (0-based)
 
 Index conventions
 -----------------
-- Levels k are printed 1-based (1..nk).
-- i, j indices are 0-based:
+- Levels k are printed 0-based: k = 0 .. nk-1.
+- i, j indices are also 0-based:
     i in [0, nx-1]
     j in [0, nx*13-1]
-  This matches Fortran-style storage where i is the fastest index.
 
 Input file format (big-endian real*4)
 -------------------------------------
-- field: [nx, nx*13, nk]  -> nk levels × (13 * nx * nx) elements in linear storage
+- field: [nx, nx*13, nk]
+        -> nk levels × (13 * nx * nx) elements in linear storage
 
 Required arguments
 ------------------
@@ -53,6 +60,7 @@ import numpy as np
 # ------------------ IO helpers (big-endian real*4) ------------------ #
 
 def open_memmap_be_f4(path: str) -> np.memmap:
+    """Open a big-endian real*4 binary file as a read-only memmap."""
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"Missing file: {path}")
     return np.memmap(path, dtype=">f4", mode="r")
@@ -86,6 +94,7 @@ def stream_level_stats(
     """
     Stream over [start:stop) and compute:
       min, max, mean, std, idx_min_flat, idx_max_flat
+
     Flat indices are 0-based within the level (length = stop - start).
 
     If use_nan=True, NaNs are ignored in all stats. If all values are NaN,
@@ -105,9 +114,10 @@ def stream_level_stats(
 
     offset_in_level = 0  # how far into this level we are (0-based)
 
-    while start < stop:
-        n = min(chunk, stop - start)
-        x = mm[start:start + n].astype("f8", copy=False)
+    cur = start
+    while cur < stop:
+        n = min(chunk, stop - cur)
+        x = mm[cur:cur + n].astype("f8", copy=False)
 
         if use_nan:
             # NaN-aware min/max with indices (within chunk)
@@ -125,6 +135,9 @@ def stream_level_stats(
                 cnt = 0
                 s = 0.0
                 ss = 0.0
+                # If everything is NaN in this chunk, don't let cmin/cmax affect globals
+                cmin = np.inf
+                cmax = -np.inf
         else:
             # No NaNs: straight min/max/sums
             cmin_idx = int(x.argmin())
@@ -150,7 +163,7 @@ def stream_level_stats(
             best_max = cmax
             best_max_idx = offset_in_level + cmax_idx
 
-        start += n
+        cur += n
         offset_in_level += n
 
     if total_count == 0:
@@ -185,16 +198,34 @@ def main():
     ap = argparse.ArgumentParser(
         description="Compute per-level min, max, mean, std, and (i,j) indices from a big-endian real*4 MITgcm LLC field."
     )
-    ap.add_argument("--field", required=True,
-                    help="Path to field .data ([nx, nx*13, nk]), big-endian real*4")
-    ap.add_argument("--nx", required=True, type=int,
-                    help="LLC face size (e.g., 8640)")
-    ap.add_argument("--nk", required=True, type=int,
-                    help="Number of vertical levels in the file (nk)")
-    ap.add_argument("--use-nan", action="store_true",
-                    help="Ignore NaNs in computations")
-    ap.add_argument("--chunk", type=int, default=5_000_000,
-                    help="Chunk size in elements (default 5e6)")
+    ap.add_argument(
+        "--field",
+        required=True,
+        help="Path to field .data ([nx, nx*13, nk]), big-endian real*4",
+    )
+    ap.add_argument(
+        "--nx",
+        required=True,
+        type=int,
+        help="LLC face size (e.g., 8640)",
+    )
+    ap.add_argument(
+        "--nk",
+        required=True,
+        type=int,
+        help="Number of vertical levels in the file (nk)",
+    )
+    ap.add_argument(
+        "--use-nan",
+        action="store_true",
+        help="Ignore NaNs in computations",
+    )
+    ap.add_argument(
+        "--chunk",
+        type=int,
+        default=5_000_000,
+        help="Chunk size in elements (default 5e6)",
+    )
 
     args = ap.parse_args()
 
@@ -215,11 +246,11 @@ def main():
     print(f"# nx={nx}  nk={nk}  n_i={n_i}  n_j={n_j}  n_per_level={n_per_level}")
     print(f"# field={args.field}")
     print("# Per-level results:")
-    print("# k  min  max  mean  std  i_min  j_min  i_max  j_max  (i,j are 0-based)")
+    print("# k  min  max  mean  std  i_min  j_min  i_max  j_max  (all 0-based)")
 
-    # Main loop over levels 1..nk
-    for k in range(1, nk + 1):
-        start = (k - 1) * n_per_level
+    # Main loop over levels k=0..nk-1 (0-based)
+    for k in range(nk):
+        start = k * n_per_level
         stop = start + n_per_level
 
         f_min, f_max, f_mean, f_std, idx_min, idx_max = stream_level_stats(
@@ -227,8 +258,7 @@ def main():
         )
 
         if idx_min >= 0:
-            # Map flat index -> (i, j) with Fortran-style i-fastest:
-            # idx = i + j * n_i
+            # Fortran-style i-fastest: idx = i + j * n_i
             i_min = idx_min % n_i
             j_min = idx_min // n_i
         else:
