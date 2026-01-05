@@ -9,7 +9,6 @@ from typing import List, Tuple
 import numpy as np
 import llc
 
-
 _FILE_RE_TEMPLATE = r"^{field}\.(\d{{10}})\.data$"
 
 
@@ -29,23 +28,6 @@ def find_matching_files(input_path: Path, field: str, ts_min: int, ts_max: int) 
     return matches
 
 
-def llc2rect_level(level_compact_yx: np.ndarray, nx: int) -> np.ndarray:
-    """
-    level_compact_yx: shape (ny, nx) where ny=13*nx, as read from file (y,x).
-    llc.llc2rect expects (nx, 13*nx), so we transpose to (x,y) before calling.
-    """
-    ny = 13 * nx
-    if level_compact_yx.shape != (ny, nx):
-        raise ValueError(f"Unexpected level shape {level_compact_yx.shape}, expected ({ny}, {nx})")
-
-    level_compact_xy = level_compact_yx.T  # (nx, 13*nx) -> what your llc2rect expects
-    # Some implementations might require contiguous input; this is still cheap-ish relative to llc2rect output.
-    if not level_compact_xy.flags["C_CONTIGUOUS"]:
-        level_compact_xy = np.ascontiguousarray(level_compact_xy)
-
-    return llc.llc2rect(level_compact_xy)
-
-
 def process_one_file(
     infile: Path,
     outfile: Path,
@@ -59,6 +41,12 @@ def process_one_file(
 ):
     ny = 13 * nx
 
+    # Validate bounds for the *input compact* slice indexing intent.
+    # (Bounds are applied AFTER llc2rect, but we validate later against llc2rect output shape.)
+    if xmin > xmax or ymin > ymax:
+        raise ValueError("Invalid bounds: require xmin<=xmax and ymin<=ymax")
+
+    # Sanity check file size
     expected_bytes = nx * ny * nz * 4
     actual_bytes = infile.stat().st_size
     if actual_bytes != expected_bytes:
@@ -69,30 +57,47 @@ def process_one_file(
 
     xlen = xmax - xmin + 1
     ylen = ymax - ymin + 1
-    if xlen <= 0 or ylen <= 0:
-        raise ValueError("Invalid bounds: require xmin<=xmax and ymin<=ymax")
 
     outfile.parent.mkdir(parents=True, exist_ok=True)
 
-    # Read as (nz, ny, nx) so x is fastest in file (standard raw .data layout)
-    inp = np.memmap(infile, dtype=">f4", mode="r", shape=(nz, ny, nx), order="C")
-    out = np.memmap(outfile, dtype=">f4", mode="w+", shape=(nz, ylen, xlen), order="C")
+    # IMPORTANT:
+    # We interpret the file as a Fortran-ordered array (x fastest, then y, then z),
+    # with shape (nx, ny, nz) == (nx, 13*nx, nz).
+    inp = np.memmap(infile, dtype=">f4", mode="r", shape=(nx, ny, nz), order="F")
+
+    # Output in the same logical axis order: (x, y, z) == (xlen, ylen, nz)
+    out = np.memmap(outfile, dtype=">f4", mode="w+", shape=(xlen, ylen, nz), order="F")
 
     rect_shape_checked = False
     for k in range(nz):
-        level_compact = inp[k, :, :]                 # (ny, nx)
-        level_rect = llc2rect_level(level_compact, nx)  # whatever llc2rect returns
+        # One horizontal level in compact LLC form: (nx, 13*nx)
+        level_compact = inp[:, :, k]
 
+        # Your llc implementation expects level_compact.shape[1] == 13*NX
+        # Ensure it sees exactly (nx, 13*nx)
+        if level_compact.shape != (nx, ny):
+            raise ValueError(f"Unexpected compact level shape {level_compact.shape}, expected ({nx},{ny})")
+
+        # Some llc implementations are picky about contiguity; make a cheap contiguous view if needed.
+        if not level_compact.flags["F_CONTIGUOUS"] and not level_compact.flags["C_CONTIGUOUS"]:
+            level_compact = np.asfortranarray(level_compact)
+
+        # Convert to rectangular
+        level_rect = llc.llc2rect(level_compact)
+
+        # Apply bounds in the order YOU specified: (x, y)
         if not rect_shape_checked:
-            H, W = level_rect.shape
-            if not (0 <= xmin <= xmax < W):
-                raise ValueError(f"x bounds out of range for llc2rect output: W={W}, got [{xmin},{xmax}]")
-            if not (0 <= ymin <= ymax < H):
-                raise ValueError(f"y bounds out of range for llc2rect output: H={H}, got [{ymin},{ymax}]")
+            rx, ry = level_rect.shape  # axis0=x, axis1=y per your convention
+            if not (0 <= xmin <= xmax < rx):
+                raise ValueError(f"x bounds out of range for llc2rect output: rx={rx}, got [{xmin},{xmax}]")
+            if not (0 <= ymin <= ymax < ry):
+                raise ValueError(f"y bounds out of range for llc2rect output: ry={ry}, got [{ymin},{ymax}]")
             rect_shape_checked = True
 
-        cut = level_rect[ymin : ymax + 1, xmin : xmax + 1]
-        out[k, :, :] = np.asarray(cut, dtype=">f4", order="C")
+        cut = level_rect[xmin : xmax + 1, ymin : ymax + 1]
+
+        # Write out as big-endian float32, preserving (x,y,z) axis order
+        out[:, :, k] = np.asarray(cut, dtype=">f4", order="F")
 
     out.flush()
     del out
@@ -100,7 +105,9 @@ def process_one_file(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Cut out a rectangular (x,y) column from LLC compact .data files.")
+    ap = argparse.ArgumentParser(
+        description="Extract a rectangular (x,y) cutout from LLC compact .data files using llc.llc2rect(), level-by-level."
+    )
     ap.add_argument("--input-path", required=True, type=Path)
     ap.add_argument("--output-path", required=True, type=Path)
     ap.add_argument("--field", required=True, type=str)
@@ -127,6 +134,12 @@ def main():
         return
 
     print(f"Found {len(files)} file(s) to process.")
+    print(
+        f"Input shape (x,y,z)=({args.nx},{13*args.nx},{args.nz}); "
+        f"Cut x=[{args.xmin},{args.xmax}], y=[{args.ymin},{args.ymax}] -> "
+        f"Output shape (x,y,z)=({args.xmax-args.xmin+1},{args.ymax-args.ymin+1},{args.nz})"
+    )
+
     for n, f in files:
         outf = args.output_path / f.name
         print(f"Processing N={n:010d}: {f.name} -> {outf}")
@@ -146,4 +159,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
