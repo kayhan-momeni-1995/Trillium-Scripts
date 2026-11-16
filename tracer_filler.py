@@ -156,16 +156,21 @@ def _build_face3_with_bc(face3: np.ndarray, face1245_trim: np.ndarray, nx: int) 
 # Per-level processing (same output as single-process)
 # ===========================
 
-def interpolate_level(fld: np.ndarray, hfacc: np.ndarray,  nx: int, k: int,
+def interpolate_level(fld: np.ndarray, hfacc: np.ndarray | None, nx: int, k: int,
                       *,
                       interp_mem_budget: int = 512 << 20) -> np.ndarray:
     # LLC -> rectangular
     fld = llc.llc2rect(fld)
-    hfacc = llc.llc2rect(hfacc)
+    if hfacc is not None:
+        hfacc = llc.llc2rect(hfacc)
 
-    # Remove zeros => NaN
+    # With hFacC, preserve original wet/dry masking exactly.
+    # Without hFacC, identify land directly from zero-valued tracer cells.
     fld = fld.copy()
-    fld[hfacc == 0] = np.nan
+    if hfacc is not None:
+        fld[hfacc == 0] = np.nan
+    else:
+        fld[fld == 0] = np.nan
     fld = fillna_with_nearest(fld)
 
     # Split out Arctic and the rest
@@ -210,23 +215,25 @@ def interpolate_level(fld: np.ndarray, hfacc: np.ndarray,  nx: int, k: int,
 
 def _worker_process_level(idx: int,
                           shm_in_name: str, in_shape: tuple[int, int],
-                          shm_hfacc_name: str,
+                          shm_hfacc_name: str | None,
                           shm_out_name: str, out_shape: tuple[int, int],
                           nx: int, k: int,
                           interp_mem_budget: int) -> int:
     """
     Worker attaches to parent-created SHMs:
       - reads native float32 input (in_shape)
+      - reads optional hFacC input when supplied
       - computes float64 result, casts once to float32
       - writes to output SHM (out_shape)
     Returns the level index.
     """
     shm_in = SharedMemory(name=shm_in_name)
-    shm_hfacc = SharedMemory(name=shm_hfacc_name)
+    shm_hfacc = SharedMemory(name=shm_hfacc_name) if shm_hfacc_name is not None else None
     shm_out = SharedMemory(name=shm_out_name)
     try:
-        in_arr  = np.ndarray(in_shape,  dtype=np.float32, buffer=shm_in.buf)   # native f32
-        hfacc_arr  = np.ndarray(in_shape,  dtype=np.float32, buffer=shm_hfacc.buf)   # native f32
+        in_arr  = np.ndarray(in_shape, dtype=np.float32, buffer=shm_in.buf)  # native f32
+        hfacc_arr = (np.ndarray(in_shape, dtype=np.float32, buffer=shm_hfacc.buf)
+                     if shm_hfacc is not None else None)
         out_arr = np.ndarray(out_shape, dtype=np.float32, buffer=shm_out.buf)  # native f32
 
         out64 = interpolate_level(in_arr, hfacc_arr, nx, k, interp_mem_budget=interp_mem_budget)
@@ -237,7 +244,8 @@ def _worker_process_level(idx: int,
         return idx
     finally:
         shm_in.close()
-        shm_hfacc.close()
+        if shm_hfacc is not None:
+            shm_hfacc.close()
         shm_out.close()
 
 
@@ -265,7 +273,7 @@ def _write_shm_to_file(fout, shm_name: str, shape: tuple[int, int], col_chunk: i
 # Parallel driver
 # ===========================
 
-def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
+def main(src_path: str, dst_path: str, hfacc_path: str | None, nx: int, k_proc: int,
          *,
          workers: int,
          inflight: int,
@@ -295,9 +303,9 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
     print(f"[info] levels={n_levels}, nx={nx}, k={k_proc}, workers={workers}, inflight={inflight}")
     print(f"[info] per-level sizes: input={in_bytes/1e6:.1f} MB, output={out_bytes/1e6:.1f} MB")
 
-    # Single input memmap
+    # Single input memmap; hFacC is only mapped when supplied.
     mm = np.memmap(src_path, dtype='u1', mode="r")
-    hfaccmm = np.memmap(hfacc_path, dtype='u1', mode="r")
+    hfaccmm = np.memmap(hfacc_path, dtype='u1', mode="r") if hfacc_path is not None else None
 
     # Writer (single)
     with open(dst_path, "wb", buffering=io.DEFAULT_BUFFER_SIZE) as fout, \
@@ -319,32 +327,35 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
                                 offset=off,
                                 strides=(4, 4*in_rows))  # Fortran layout on disk
 
-            lvl_be_hfacc = np.ndarray(shape=(in_rows, in_cols),
-                                dtype=">f4",
-                                buffer=hfaccmm,
-                                offset=off,
-                                strides=(4, 4*in_rows))  # Fortran layout on disk
+            if hfaccmm is not None:
+                lvl_be_hfacc = np.ndarray(shape=(in_rows, in_cols),
+                                    dtype=">f4",
+                                    buffer=hfaccmm,
+                                    offset=off,
+                                    strides=(4, 4*in_rows))  # Fortran layout on disk
 
-            # Parent creates input SHM (native f32) and copies the level
-            shm_in    = SharedMemory(create=True, size=in_bytes)
-            shm_hfacc = SharedMemory(create=True, size=in_bytes)
+            # Parent creates input SHM (native f32) and optionally hFacC SHM.
+            shm_in = SharedMemory(create=True, size=in_bytes)
+            shm_hfacc = SharedMemory(create=True, size=in_bytes) if hfaccmm is not None else None
             in_arr = np.ndarray((in_rows, in_cols), dtype=np.float32, buffer=shm_in.buf)
-            hfacc_arr = np.ndarray((in_rows, in_cols), dtype=np.float32, buffer=shm_hfacc.buf)
             np.copyto(in_arr, lvl_be, casting="unsafe")  # endian + dtype convert in one pass
-            np.copyto(hfacc_arr, lvl_be_hfacc, casting="unsafe")  # endian + dtype convert in one pass
+            if shm_hfacc is not None:
+                hfacc_arr = np.ndarray((in_rows, in_cols), dtype=np.float32, buffer=shm_hfacc.buf)
+                np.copyto(hfacc_arr, lvl_be_hfacc, casting="unsafe")  # same as original
 
             # Parent creates output SHM (native f32) for worker to fill
             shm_out = SharedMemory(create=True, size=out_bytes)
 
             # Dispatch worker (attaches to SHMs by name; no unlink in worker)
+            shm_hfacc_name = shm_hfacc.name if shm_hfacc is not None else None
             fut = pool.submit(_worker_process_level,
                               idx,
                               shm_in.name, (in_rows, in_cols),
-                              shm_hfacc.name,
+                              shm_hfacc_name,
                               shm_out.name, (out_rows, out_cols),
                               nx, k_proc,
                               interp_mem_budget)
-            pending[fut] = (idx, shm_in.name, shm_hfacc.name, shm_out.name)
+            pending[fut] = (idx, shm_in.name, shm_hfacc_name, shm_out.name)
             submitted += 1
 
         # Prime initial inflight
@@ -376,10 +387,11 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
                         shm_in = SharedMemory(name=in_name); shm_in.close(); shm_in.unlink()
                     except FileNotFoundError:
                         pass
-                    try:
-                        shm_hfacc = SharedMemory(name=hfacc_name); shm_hfacc.close(); shm_hfacc.unlink()
-                    except FileNotFoundError:
-                        pass
+                    if hfacc_name is not None:
+                        try:
+                            shm_hfacc = SharedMemory(name=hfacc_name); shm_hfacc.close(); shm_hfacc.unlink()
+                        except FileNotFoundError:
+                            pass
 
                     written += 1
                     next_to_write += 1
@@ -398,7 +410,8 @@ def main(src_path: str, dst_path: str, hfacc_path: str, nx: int, k_proc: int,
 
     # Close input memmap
     del mm
-    del hfaccmm
+    if hfaccmm is not None:
+        del hfaccmm
 
     print(f"Finished. Wrote {n_levels} levels to {dst_path}")
 
@@ -408,7 +421,7 @@ if __name__ == "__main__":
     ap.add_argument("--nx", type=int, required=True, help="Tile size (e.g., 270 or 1080)")
     ap.add_argument("--k", type=int, default=1, help="Upsampling factor")
     ap.add_argument("--input", required=True, help="Path to input .data (big-endian real*4)")
-    ap.add_argument("--hFacC", required=True, help="Path to the source grid's hFacC file (big-endian real*4). This is **NOT** the target grid's hFacC.")
+    ap.add_argument("--hFacC", default=None, help="Optional path to the source grid's hFacC file (big-endian real*4). If omitted, zero-valued tracer cells are treated as land. This is NOT the target grid's hFacC.")
     ap.add_argument("--output", required=True, help="Path to output .data (will be overwritten)")
     ap.add_argument("--mem", type=str, default="4G",
                     help="Approx per-interpolator working memory for interpolation chunks, e.g. 256M, 1G, 2G")
