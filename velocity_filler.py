@@ -530,10 +530,6 @@ def main(u_src_path: str, v_src_path: str,
                 assert idx_done == idx
                 ready[idx] = shm_names
 
-                # Maintain inflight: submit next if any left
-                if submitted < n_levels:
-                    submit_level(submitted)
-
                 # Write in strict order as far as possible
                 while next_to_write in ready:
                     shm_u_in_name, shm_v_in_name, shm_u_out_name, shm_v_out_name = ready.pop(next_to_write)
@@ -566,6 +562,15 @@ def main(u_src_path: str, v_src_path: str,
                     next_to_write += 1
                     print(f"Level {written}/{n_levels} written.")
                     sys.stdout.flush()
+
+                # Submit more work only when there is room.
+                # Include completed levels still waiting to be written.
+                while (
+                    submitted < n_levels
+                    and len(pending) + len(ready) < inflight
+                ):
+                    submit_level(submitted)
+
                 break  # re-enter as_completed with updated 'pending'
 
     # Close input memmaps
